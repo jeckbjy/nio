@@ -10,6 +10,6 @@ type poller interface {
 	Wait(s *Selector, cb SelectCB, msec int) error
 
 	Add(fd uintptr, ops int) error
-	Modify(fd uintptr, ops int) error
 	Delete(fd uintptr, ops int) error
+	Modify(fd uintptr, old, ops int) error
 }

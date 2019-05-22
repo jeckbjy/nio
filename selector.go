@@ -3,7 +3,8 @@ package nio
 import (
 	"fmt"
 	"net"
-	"syscall"
+
+	"github.com/jeckbjy/nio/internal"
 )
 
 var (
@@ -19,11 +20,12 @@ var (
 )
 
 const (
-	OP_ACCEPT  = 0x01
-	OP_CONNECT = 0x02 // not support
-	OP_READ    = 0x04
-	OP_WRITE   = 0x08
-	op_CLOSED  = 0x10 // socket closed
+	OP_ACCEPT = 0x01
+	//OP_CONNECT = 0x02 // not support
+	OP_READ  = 0x04
+	OP_WRITE = 0x08
+	op_IN    = OP_READ | OP_ACCEPT
+	op_OUT   = OP_WRITE
 )
 
 type SelectionKey struct {
@@ -38,16 +40,12 @@ func (sk *SelectionKey) reset() {
 	sk.ready = 0
 }
 
-func (sk *SelectionKey) Closed() bool {
-	return sk.ready&op_CLOSED != 0
+func (sk *SelectionKey) Fd() uintptr {
+	return sk.fd
 }
 
 func (sk *SelectionKey) Acceptable() bool {
 	return sk.ready&OP_ACCEPT != 0
-}
-
-func (sk *SelectionKey) Connectable() bool {
-	return sk.ready&OP_CONNECT != 0
 }
 
 func (sk *SelectionKey) Readable() bool {
@@ -60,6 +58,20 @@ func (sk *SelectionKey) Writable() bool {
 
 func (sk *SelectionKey) isInterests(ops int) bool {
 	return sk.interests&ops != 0
+}
+
+func (sk *SelectionKey) setReadyIn() {
+	if sk.isInterests(OP_ACCEPT) {
+		sk.ready |= OP_ACCEPT
+	} else if sk.isInterests(OP_READ) {
+		sk.ready |= OP_READ
+	}
+}
+
+func (sk *SelectionKey) setReadyOut() {
+	if sk.isInterests(OP_WRITE) {
+		sk.ready |= OP_WRITE
+	}
 }
 
 func (sk *SelectionKey) InterestOps() int {
@@ -114,17 +126,20 @@ type Selector struct {
 	readyKeys []*SelectionKey
 }
 
-func (s *Selector) Add(conn interface{}, ops int, data interface{}) (*SelectionKey, error) {
-	fd, err := getFd(conn)
+func (s *Selector) Add(channel interface{}, ops int, data interface{}) (*SelectionKey, error) {
+	fd, err := getFd(channel)
 	if err != nil {
 		return nil, err
 	}
+
+	fmt.Printf("add channel:%+v\n", fd)
 
 	if s.keys[fd] != nil {
 		return nil, ErrRegistered
 	}
 
-	if err := syscall.SetNonblock(int(fd), true); err != nil {
+	if err := internal.SetNonblock(fd, true); err != nil {
+		fmt.Printf("setnonblock fail:%+v\n", err)
 		return nil, err
 	}
 
@@ -132,7 +147,7 @@ func (s *Selector) Add(conn interface{}, ops int, data interface{}) (*SelectionK
 		return nil, err
 	}
 
-	sk := &SelectionKey{channel: conn, data: data, fd: fd, interests: ops}
+	sk := &SelectionKey{channel: channel, data: data, fd: fd, interests: ops}
 	s.keys[fd] = sk
 	return sk, nil
 }
@@ -163,7 +178,62 @@ func (s *Selector) Modify(conn interface{}, ops int) error {
 		return ErrNotRegistered
 	}
 
-	return s.poll.Modify(fd, ops)
+	if ops == sk.interests {
+		return nil
+	}
+
+	old := sk.interests
+	sk.interests = ops
+
+	return s.poll.Modify(fd, old, ops)
+}
+
+// ModifyXOR 切换某个状态开关,通常用于OP_WRITE状态控制
+func (s *Selector) ModifyXOR(conn interface{}, ops int) error {
+	if ops == 0 {
+		return nil
+	}
+
+	fd, err := getFd(conn)
+	if err != nil {
+		return err
+	}
+
+	sk := s.keys[fd]
+	if sk == nil {
+		return ErrNotRegistered
+	}
+
+	old := sk.interests
+	sk.interests ^= ops
+
+	return s.poll.Modify(fd, old, sk.interests)
+}
+
+// ModifyIf 添加或删除某个状态
+func (s *Selector) ModifyIf(conn interface{}, ops int, add bool) error {
+	if ops == 0 {
+		return nil
+	}
+
+	fd, err := getFd(conn)
+	if err != nil {
+		return err
+	}
+
+	sk := s.keys[fd]
+	if sk == nil {
+		return ErrNotRegistered
+	}
+
+	old := sk.interests
+	if add {
+		sk.interests |= ops
+	} else {
+		sk.interests &^= ops
+	}
+
+	return s.poll.Modify(fd, old, sk.interests)
 }
 
 func (s *Selector) Wakeup() error {

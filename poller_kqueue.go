@@ -3,6 +3,7 @@
 package nio
 
 import (
+	"fmt"
 	"syscall"
 )
 
@@ -10,6 +11,7 @@ func newPoller() poller {
 	return &kqueue{}
 }
 
+// http://eradman.com/posts/kqueue-tcp.html
 type kqueue struct {
 	kfd    int
 	events []syscall.Kevent_t
@@ -39,7 +41,9 @@ func (p *kqueue) Close() error {
 }
 
 func (p *kqueue) Wakeup() error {
-	return nil
+	changes := []syscall.Kevent_t{{Ident: 0, Filter: syscall.EVFILT_USER, Fflags: syscall.NOTE_TRIGGER}}
+	_, err := syscall.Kevent(p.kfd, changes, nil, nil)
+	return err
 }
 
 func (p *kqueue) Wait(s *Selector, cb SelectCB, msec int) error {
@@ -64,20 +68,19 @@ func (p *kqueue) Wait(s *Selector, cb SelectCB, msec int) error {
 
 			sk.reset()
 
-			if ev.Filter == syscall.EVFILT_READ || ev.Flags&(syscall.EV_ERROR|syscall.EV_EOF) != 0 {
-				if sk.isInterests(OP_ACCEPT) {
-					sk.ready |= OP_ACCEPT
-				} else if sk.isInterests(OP_READ) {
-					sk.ready |= OP_READ
-				}
+			if ev.Flags&(syscall.EV_ERROR|syscall.EV_EOF) != 0 {
+				fmt.Printf("kqueue err:%+v,%+v\n", fd, ev.Filter)
+				sk.setReadyIn()
+				sk.setReadyOut()
+				continue
 			}
 
-			if ev.Filter == syscall.EVFILT_WRITE || ev.Flags&(syscall.EV_ERROR|syscall.EV_EOF) != 0 {
-				if sk.isInterests(OP_WRITE) {
-					sk.ready |= OP_WRITE
-				} else if sk.isInterests(OP_CONNECT) {
-					sk.ready |= OP_WRITE
-				}
+			if ev.Filter == syscall.EVFILT_READ {
+				sk.setReadyIn()
+			}
+
+			if ev.Filter == syscall.EVFILT_WRITE {
+				sk.setReadyOut()
 			}
 
 			if cb != nil {
@@ -92,94 +95,51 @@ func (p *kqueue) Wait(s *Selector, cb SelectCB, msec int) error {
 }
 
 func (p *kqueue) Add(fd uintptr, ops int) error {
-	return p.control(fd, true, ops)
-}
-
-func (p *kqueue) Modify(fd uintptr, ops int) error {
-	return p.control(fd, true, ops)
+	changes := [4]syscall.Kevent_t{}
+	num := p.control(&changes, 0, fd, ops, true)
+	_, err := syscall.Kevent(p.kfd, changes[:num], nil, nil)
+	return err
 }
 
 func (p *kqueue) Delete(fd uintptr, ops int) error {
-	return p.control(fd, false, ops)
+	changes := [4]syscall.Kevent_t{}
+	num := p.control(&changes, 0, fd, ops, false)
+	_, err := syscall.Kevent(p.kfd, changes[:num], nil, nil)
+	return err
 }
 
-func (p *kqueue) control(fd uintptr, add bool, events int) error {
-	changes := make([]syscall.Kevent_t, 0, 2)
+func (p *kqueue) Modify(fd uintptr, old, ops int) error {
+	changes := [4]syscall.Kevent_t{}
+	num := 0
+
+	if old != 0 {
+		// delete old
+		num = p.control(&changes, 0, fd, old, false)
+	}
+
+	num = p.control(&changes, num, fd, ops, true)
+	_, err := syscall.Kevent(p.kfd, changes[:num], nil, nil)
+	return err
+}
+
+func (p *kqueue) control(changes *[4]syscall.Kevent_t, num int, fd uintptr, ops int, add bool) int {
+	ident := uint64(fd)
 	var flags uint16
 	if add {
-		// EV_CLEAR:Edge Triggered
 		flags = syscall.EV_ADD | syscall.EV_CLEAR
 	} else {
 		flags = syscall.EV_DELETE
 	}
 
-	if events&(OP_ACCEPT|OP_READ) != 0 {
-		changes = append(changes, syscall.Kevent_t{Ident: uint64(fd), Flags: flags, Filter: syscall.EVFILT_READ})
+	if ops&op_IN != 0 {
+		changes[num] = syscall.Kevent_t{Filter: syscall.EVFILT_READ, Ident: ident, Flags: flags}
+		num++
 	}
 
-	if events&(OP_WRITE|OP_CONNECT) != 0 {
-		changes = append(changes, syscall.Kevent_t{Ident: uint64(fd), Flags: flags, Filter: syscall.EVFILT_WRITE})
+	if ops&op_OUT != 0 {
+		changes[num] = syscall.Kevent_t{Filter: syscall.EVFILT_WRITE, Ident: ident, Flags: flags}
+		num++
 	}
 
-	_, err := syscall.Kevent(p.kfd, changes, nil, nil)
-	return err
+	return num
 }
-
-//func toKevent(events int, add bool) []syscall.Kevent_t {
-//	//kevents := make([]syscall.Kevent_t, 0, 2)
-//	//var flags uint16
-//	//if add {
-//	//	flags = syscall.EV_ADD
-//	//	if (events & EventOneShot) != 0 {
-//	//		flags |= syscall.EV_ONESHOT
-//	//	}
-//	//
-//	//	if (events & EventEdgeTriggered) != 0 {
-//	//		flags |= syscall.EV_CLEAR
-//	//	}
-//	//} else {
-//	//	flags = syscall.EV_DELETE
-//	//}
-//	//
-//	//if (events & EventRead) != 0 {
-//	//	kevents = append(kevents, syscall.Kevent_t{Flags: flags, Filter: syscall.EVFILT_READ})
-//	//}
-//	//
-//	//if (events & EventWrite) != 0 {
-//	//	kevents = append(kevents, syscall.Kevent_t{Flags: flags, Filter: syscall.EVFILT_WRITE})
-//	//}
-//	//
-//	//return kevents
-//}
-//
-//func toEvent(ev *syscall.Kevent_t) int {
-//	events := 0
-//	flags := ev.Flags
-//	filter := ev.Filter
-//
-//	if (flags & syscall.EV_ERROR) != 0 {
-//		events |= EventErr
-//	}
-//
-//	// Set EventHup for any EOF flag. Below will be more precise detection
-//	// of what exatcly HUP occured.
-//	if (flags & syscall.EV_EOF) != 0 {
-//		events |= EventHup
-//	}
-//
-//	if filter == syscall.EVFILT_READ {
-//		events |= EventRead
-//		if (flags & syscall.EV_EOF) != 0 {
-//			events |= EventReadHup
-//		}
-//	}
-//
-//	if filter == syscall.EVFILT_WRITE {
-//		events |= EventWrite
-//		if (flags & syscall.EV_EOF) != 0 {
-//			events |= EventWriteHup
-//		}
-//	}
-//
-//	return events
-//}

@@ -6,7 +6,7 @@ import (
 	"syscall"
 )
 
-// filer describes an object that has ability to return os.File.
+// ifile describes an object that has ability to return os.File.
 type ifile interface {
 	// File returns a copy of object's file descriptor.
 	File() (*os.File, error)

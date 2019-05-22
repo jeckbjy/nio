@@ -56,7 +56,8 @@ func (p *epoll) Close() error {
 }
 
 func (p *epoll) Wakeup() error {
-	return nil
+	_, err := syscall.Write(p.wfd, []byte{0, 0, 0, 0, 0, 0, 0, 1})
+	return err
 }
 
 func (p *epoll) Wait(s *Selector, cb SelectCB, msec int) error {
@@ -72,7 +73,12 @@ func (p *epoll) Wait(s *Selector, cb SelectCB, msec int) error {
 
 		for i := 0; i < n; i++ {
 			ev := &p.events[i]
-			fd := ev.Fd
+			fd := int(ev.Fd)
+
+			if fd == p.wfd {
+				continue
+			}
+
 			sk := s.getSelectionKey(uintptr(fd))
 			if sk == nil {
 				// close socket?
@@ -81,22 +87,12 @@ func (p *epoll) Wait(s *Selector, cb SelectCB, msec int) error {
 
 			sk.reset()
 
-			// check error?
-
 			if ev.Events&(syscall.EPOLLIN|syscall.EPOLLERR|syscall.EPOLLHUP) != 0 {
-				if sk.isInterests(OP_ACCEPT) {
-					sk.ready |= OP_ACCEPT
-				} else if sk.isInterests(OP_READ) {
-					sk.ready |= OP_READ
-				}
+				sk.setReadyIn()
 			}
 
 			if ev.Events&(syscall.EPOLLOUT|syscall.EPOLLERR|syscall.EPOLLHUP) != 0 {
-				if sk.isInterests(OP_WRITE) {
-					sk.ready |= OP_WRITE
-				} else if sk.isInterests(OP_CONNECT) {
-					sk.ready |= OP_CONNECT
-				}
+				sk.setReadyOut()
 			}
 
 			if cb != nil {
@@ -106,7 +102,7 @@ func (p *epoll) Wait(s *Selector, cb SelectCB, msec int) error {
 			}
 		}
 
-		break
+		return nil
 	}
 
 	return nil
@@ -117,23 +113,23 @@ func (p *epoll) Add(fd uintptr, ops int) error {
 	return syscall.EpollCtl(p.efd, syscall.EPOLL_CTL_ADD, int(fd), ev)
 }
 
-func (p *epoll) Modify(fd uintptr, ops int) error {
-	ev := &syscall.EpollEvent{Events: toEpollEvents(ops), Fd: int32(fd)}
-	return syscall.EpollCtl(p.efd, syscall.EPOLL_CTL_MOD, int(fd), ev)
-}
-
 func (p *epoll) Delete(fd uintptr, ops int) error {
 	return syscall.EpollCtl(p.efd, syscall.EPOLL_CTL_DEL, int(fd), nil)
+}
+
+func (p *epoll) Modify(fd uintptr, old, ops int) error {
+	ev := &syscall.EpollEvent{Events: toEpollEvents(ops), Fd: int32(fd)}
+	return syscall.EpollCtl(p.efd, syscall.EPOLL_CTL_MOD, int(fd), ev)
 }
 
 func toEpollEvents(ops int) uint32 {
 	events := syscall.EPOLLET | syscall.EPOLLPRI
 
-	if ops&(OP_ACCEPT|OP_READ) != 0 {
+	if ops&op_IN != 0 {
 		events |= syscall.EPOLLIN
 	}
 
-	if ops&(OP_WRITE|OP_CONNECT) != 0 {
+	if ops&op_OUT != 0 {
 		events |= syscall.EPOLLOUT
 	}
 
