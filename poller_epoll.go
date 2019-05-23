@@ -73,13 +73,13 @@ func (p *epoll) Wait(s *Selector, cb SelectCB, msec int) error {
 
 		for i := 0; i < n; i++ {
 			ev := &p.events[i]
-			fd := int(ev.Fd)
+			fd := uintptr(ev.Fd)
 
-			if fd == p.wfd {
+			if fd == uintptr(p.wfd) {
 				continue
 			}
 
-			sk := s.getSelectionKey(uintptr(fd))
+			sk := s.keys[fd]
 			if sk == nil {
 				// close socket?
 				continue

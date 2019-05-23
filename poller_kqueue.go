@@ -3,7 +3,7 @@
 package nio
 
 import (
-	"fmt"
+	"log"
 	"syscall"
 )
 
@@ -60,8 +60,8 @@ func (p *kqueue) Wait(s *Selector, cb SelectCB, msec int) error {
 
 		for i := 0; i < n; i++ {
 			ev := &p.events[i]
-			fd := ev.Ident
-			sk := s.getSelectionKey(uintptr(fd))
+			fd := uintptr(ev.Ident)
+			sk := s.keys[fd]
 			if sk == nil {
 				continue
 			}
@@ -69,7 +69,7 @@ func (p *kqueue) Wait(s *Selector, cb SelectCB, msec int) error {
 			sk.reset()
 
 			if ev.Flags&(syscall.EV_ERROR|syscall.EV_EOF) != 0 {
-				fmt.Printf("kqueue err:%+v,%+v\n", fd, ev.Filter)
+				log.Printf("wait err:%+v\n", syscall.Errno(ev.Data).Error())
 				sk.setReadyIn()
 				sk.setReadyOut()
 				continue

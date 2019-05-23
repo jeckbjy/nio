@@ -14,3 +14,5 @@
 .idea/
 
 examples/echo/echo
+examples/echo/echo_linux
+examples/gotest/gotest
